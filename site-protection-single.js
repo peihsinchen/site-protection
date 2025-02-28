@@ -1,5 +1,12 @@
-// 文章頁面保護（遮罩和亂碼）- 加強版
+// 文章頁面保護（遮罩和亂碼）- 加強版 v2
 (function() {
+  // 定義全域變數追蹤閱讀模式狀態
+  window.protectionState = {
+    readingModeActive: false,
+    protectionApplied: false,
+    intervalId: null
+  };
+  
   // 自動插入CSS - 擴展選擇器以涵蓋閱讀模式
   const postProtectionCSS = `
   /* 文章內容保護樣式 - 涵蓋閱讀模式 */
@@ -118,8 +125,17 @@
     return document.body.classList.contains('post-template') || 
            document.body.classList.contains('reader-view') ||
            document.querySelector('[data-ghost-reading-mode]') !== null ||
+           document.querySelector('.gh-article-reading-mode, .gh-rm-container, [class*="reading-mode"]') !== null ||
            // 額外檢查特定的文章頁面 URL 模式 (可選)
            /\/p\/|\/post\/|\/article\//.test(window.location.pathname);
+  }
+
+  // 檢查閱讀模式是否啟用
+  function isReadingModeActive() {
+    return document.body.classList.contains('reader-view') ||
+           document.querySelector('[data-ghost-reading-mode]') !== null ||
+           document.querySelector('.gh-article-reading-mode, .gh-rm-container, [class*="reading-mode"]') !== null ||
+           (window.protectionState && window.protectionState.readingModeActive);
   }
   
   // 在DOM加載後初始化
@@ -135,6 +151,87 @@
     
     // 監聽類別變化 (針對閱讀模式切換)
     observeBodyClassChanges();
+    
+    // 監聽閱讀模式按鈕點擊
+    setupReadingModeButtonListener();
+    
+    // 監聽閱讀模式快捷鍵
+    setupKeyboardListener();
+    
+    // 設置定期檢查機制
+    setupPeriodicCheck();
+  }
+  
+  // 監聽閱讀模式按鈕
+  function setupReadingModeButtonListener() {
+    // 使用事件代理來監聽可能的閱讀模式按鈕
+    document.addEventListener('click', function(e) {
+      // 檢查是否點擊了閱讀模式相關按鈕
+      const target = e.target;
+      const isReadingModeButton = 
+        target.closest('[aria-label*="reading"], [title*="reading"], [class*="reading-mode"], [id*="reading-mode"]') ||
+        (target.textContent && /reading mode/i.test(target.textContent));
+      
+      if (isReadingModeButton) {
+        console.log("檢測到閱讀模式按鈕點擊");
+        window.protectionState.readingModeActive = true;
+        
+        // 使用延遲確保元素已加載
+        setTimeout(function() {
+          applyProtectionToReadingMode();
+        }, 100);
+        
+        // 再次嘗試，確保保護已應用
+        setTimeout(function() {
+          applyProtectionToReadingMode();
+        }, 500);
+      }
+    }, true);
+  }
+  
+  // 監聽可能的閱讀模式快捷鍵
+  function setupKeyboardListener() {
+    document.addEventListener('keydown', function(e) {
+      // 檢查常見閱讀模式快捷鍵組合 (Ctrl+Alt+R, Alt+R, Ctrl+E 等)
+      if ((e.ctrlKey && e.altKey && e.key === 'r') || 
+          (e.altKey && e.key === 'r') || 
+          (e.ctrlKey && e.key === 'e')) {
+        console.log("檢測到閱讀模式快捷鍵");
+        window.protectionState.readingModeActive = true;
+        
+        // 使用延遲確保進入閱讀模式後能應用保護
+        setTimeout(function() {
+          applyProtectionToReadingMode();
+        }, 100);
+        
+        // 再次嘗試，確保保護已應用
+        setTimeout(function() {
+          applyProtectionToReadingMode();
+        }, 500);
+      }
+    });
+  }
+  
+  // 定期檢查閱讀模式並應用保護
+  function setupPeriodicCheck() {
+    // 清除可能存在的舊計時器
+    if (window.protectionState.intervalId) {
+      clearInterval(window.protectionState.intervalId);
+    }
+    
+    // 設置新的定期檢查
+    window.protectionState.intervalId = setInterval(function() {
+      if (isPostPage()) {
+        if (isReadingModeActive() && !window.protectionState.protectionApplied) {
+          console.log("定期檢查：發現閱讀模式已啟用但未保護");
+          applyProtectionToReadingMode();
+        }
+      } else {
+        // 不是文章頁面時清除計時器
+        clearInterval(window.protectionState.intervalId);
+        window.protectionState.intervalId = null;
+      }
+    }, 1000); // 每秒檢查一次
   }
   
   // 監視 body 類別變化 (針對閱讀模式切換)
@@ -145,7 +242,14 @@
           // 當 body 類別變化時重新應用保護
           if (isPostPage()) {
             console.log("檢測到閱讀模式變化，重新套用保護");
-            applyProtection();
+            
+            // 檢查是否進入閱讀模式
+            if (isReadingModeActive()) {
+              window.protectionState.readingModeActive = true;
+              applyProtectionToReadingMode();
+            } else {
+              applyProtection();
+            }
           }
         }
       });
@@ -161,23 +265,53 @@
   function setupReadingModeObserver() {
     // 使用 MutationObserver 監視 DOM 變化，特別是閱讀模式的出現
     const readingModeObserver = new MutationObserver(mutations => {
+      let readingModeDetected = false;
+      
       mutations.forEach(mutation => {
-        if (mutation.type === 'childList' || mutation.type === 'attributes') {
-          // 檢查是否有閱讀模式相關元素被添加
-          if (document.querySelector('.reader-view, [data-ghost-reading-mode]')) {
-            console.log("檢測到閱讀模式，應用保護");
-            applyProtection();
+        // 針對 childList 類型的變化
+        if (mutation.type === 'childList') {
+          // 檢查所有新添加的節點
+          mutation.addedNodes.forEach(node => {
+            if (node.nodeType === 1) { // 元素節點
+              // 檢查節點是否包含閱讀模式相關 class 或 attribute
+              if (node.classList && 
+                  (node.classList.contains('reader-view') || 
+                   node.classList.contains('gh-article-reading-mode') ||
+                   node.getAttribute('data-ghost-reading-mode') !== null ||
+                   node.querySelector('[data-ghost-reading-mode], .gh-article-reading-mode, .gh-rm-container'))) {
+                readingModeDetected = true;
+              }
+            }
+          });
+        }
+        
+        // 針對 attributes 類型的變化
+        if (mutation.type === 'attributes') {
+          const target = mutation.target;
+          if (target.nodeType === 1) { // 元素節點
+            if (target.getAttribute('data-ghost-reading-mode') !== null ||
+                target.classList.contains('reader-view') ||
+                target.classList.contains('gh-article-reading-mode')) {
+              readingModeDetected = true;
+            }
           }
         }
       });
+      
+      // 如果檢測到閱讀模式相關變化
+      if (readingModeDetected) {
+        console.log("檢測到閱讀模式，應用專門保護");
+        window.protectionState.readingModeActive = true;
+        applyProtectionToReadingMode();
+      }
     });
     
-    // 設定觀察選項 - 監視整個文檔
+    // 設定觀察選項 - 監視整個文檔，更全面的監視
     readingModeObserver.observe(document.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['class', 'data-ghost-reading-mode']
+      attributeFilter: ['class', 'data-ghost-reading-mode', 'id', 'style']
     });
   }
   
@@ -192,6 +326,96 @@
       
       // 添加亂碼保護
       setupTextScrambling();
+      
+      // 標記保護已應用
+      window.protectionState.protectionApplied = true;
+    }
+  }
+  
+  // 專門針對閱讀模式應用保護
+  function applyProtectionToReadingMode() {
+    // 確保是在閱讀模式下
+    if (isReadingModeActive()) {
+      console.log("閱讀模式專用保護已啟用");
+      
+      // 尋找閱讀模式容器
+      const readingModeContainers = document.querySelectorAll(`
+        .reader-view-content, .reader-article-content, 
+        [data-ghost-reading-mode], .gh-article-reading-mode, 
+        .gh-rm-container, [class*="reading-mode"]
+      `);
+      
+      if (readingModeContainers.length > 0) {
+        console.log(`找到 ${readingModeContainers.length} 個閱讀模式容器`);
+        
+        // 為每個閱讀模式容器添加保護
+        readingModeContainers.forEach(container => {
+          // 添加遮罩
+          if (!container.querySelector('.content-protection-overlay')) {
+            const overlay = document.createElement('div');
+            overlay.className = 'content-protection-overlay';
+            if (container.firstChild) {
+              container.insertBefore(overlay, container.firstChild);
+            } else {
+              container.appendChild(overlay);
+            }
+          }
+          
+          // 處理容器內的文本元素
+          processContentElements(container);
+          
+          // 觀察容器內的變化
+          observeDynamicContent(container);
+        });
+        
+        // 標記保護已應用
+        window.protectionState.protectionApplied = true;
+      } else {
+        console.log("未找到閱讀模式容器，將進行全域搜索");
+        
+        // 嘗試在整個文檔中查找內容元素
+        const allParagraphs = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6');
+        if (allParagraphs.length > 0) {
+          const contentParent = allParagraphs[0].closest('article, [class*="article"], [class*="content"]');
+          if (contentParent) {
+            console.log("找到可能的內容父元素，應用保護");
+            
+            // 添加遮罩
+            if (!contentParent.querySelector('.content-protection-overlay')) {
+              const overlay = document.createElement('div');
+              overlay.className = 'content-protection-overlay';
+              if (contentParent.firstChild) {
+                contentParent.insertBefore(overlay, contentParent.firstChild);
+              } else {
+                contentParent.appendChild(overlay);
+              }
+            }
+            
+            // 處理內容元素
+            processContentElements(contentParent);
+            observeDynamicContent(contentParent);
+            
+            // 標記保護已應用
+            window.protectionState.protectionApplied = true;
+          } else {
+            console.log("找不到內容父元素，將處理所有段落");
+            
+            // 處理所有找到的段落
+            allParagraphs.forEach(p => {
+              if (p.textContent.trim().length >= MIN_TEXT_LENGTH && !p.closest('a')) {
+                processElement(p);
+              }
+            });
+            
+            // 標記保護已應用
+            window.protectionState.protectionApplied = true;
+          }
+        } else {
+          console.log("未找到任何段落，將再次嘗試");
+          // 標記保護未應用，後續定期檢查會再次嘗試
+          window.protectionState.protectionApplied = false;
+        }
+      }
     }
   }
   
@@ -428,5 +652,40 @@
   // 如果頁面已經加載，立即初始化
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     initializeProtection();
+  }
+  
+  // 註冊頁面載入完成事件
+  window.addEventListener('load', function() {
+    // 頁面完全載入後，再次檢查並應用保護
+    if (isPostPage()) {
+      console.log("頁面完全載入，確保保護已應用");
+      
+      if (isReadingModeActive()) {
+        applyProtectionToReadingMode();
+      } else {
+        applyProtection();
+      }
+      
+      // 特別針對可能的閱讀模式延遲加載
+      setTimeout(function() {
+        if (isReadingModeActive() && !window.protectionState.protectionApplied) {
+          console.log("延遲檢查：應用閱讀模式保護");
+          applyProtectionToReadingMode();
+        }
+      }, 1500);
+    }
+  });
+  
+  // 立即執行一次初始檢查
+  if (isPostPage()) {
+    // 使用setTimeout來確保DOM有機會先載入
+    setTimeout(function() {
+      console.log("執行初始保護檢查");
+      if (isReadingModeActive()) {
+        applyProtectionToReadingMode();
+      } else {
+        applyProtection();
+      }
+    }, 0);
   }
 })();
